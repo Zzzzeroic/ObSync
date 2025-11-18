@@ -1,1 +1,5 @@
 __*
+bin/
+.vscode
+.git
+obsync.db
