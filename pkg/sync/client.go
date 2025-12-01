@@ -83,6 +83,12 @@ func (c *Client) syncOnce() error {
 			log.Printf("Download %s failed: %v", path, err)
 		}
 	}
+	for _, path := range diff["upload"].([]interface{}) {
+		uploadPath := filepath.Join(c.Repo.Root, path.(string))
+		if err := c.uploadFile(uploadPath); err != nil {
+			log.Printf("upload %s failed: %v", path, err)
+		}
+	}
 	return nil
 }
 
@@ -139,7 +145,10 @@ func (c *Client) watchAndServe() error {
 		return err
 	}
 	defer watcher.Close()
-	watcher.Add(c.Repo.Root)
+	allSubDir, _ := c.Repo.ScanAllDir()
+	for _, subDir := range allSubDir {
+		watcher.Add(string(subDir))
+	}
 
 	// 启动接收协程
 	go func() {

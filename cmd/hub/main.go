@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -94,9 +95,18 @@ func (h *Hub) handleConn(c net.Conn) {
 // handleDiff 处理差异查询
 func (h *Hub) handleDiff(req *protocol.Message) *protocol.Message {
 	// 1. 解析客户端发来的 Payload（客户端文件列表）
-	clientFiles, ok := req.Payload.(map[string]interface{})
+	rawClientFiles, ok := req.Payload.(map[string]interface{})
 	if !ok {
 		return &protocol.Message{Error: "invalid client payload"}
+	}
+	clientFiles := make(map[string]fsops.FileInfo)
+	for path, rawInfo := range rawClientFiles {
+		info, err := protocol.ExtractFileInfo(rawInfo)
+		if err != nil {
+			log.Printf("跳过文件 %s: %v", path, err)
+			continue
+		}
+		clientFiles[path] = info
 	}
 
 	// 2. 扫描服务器仓库
@@ -106,22 +116,30 @@ func (h *Hub) handleDiff(req *protocol.Message) *protocol.Message {
 	}
 
 	// 3. 计算差异
-	download := []string{} // 客户端缺，服务器有
-	upload := []string{}   // 客户端有，服务器缺
+	download := []string{} // 客户端缺or旧，服务器有
+	upload := []string{}   // 客户端有，服务器缺or旧
 
-	fmt.Println("Hub log (serverFiles):\n", serverFiles)
-	fmt.Println("Hub log (clientFiles):\n", clientFiles)
-
-	for path, serverHash := range serverFiles {
-		clientHash, exists := clientFiles[path]
-		fmt.Println("clientHash:\n", clientHash, "exists:\n", exists)
-		if !exists || clientHash != serverHash {
-			download = append(download, path)
+	for serverPath, serverFileInfo := range serverFiles {
+		clientFileInfo, exists := clientFiles[serverPath]
+		fmt.Println("serverPath:\n", serverPath)
+		fmt.Println("clientFile[path]:\n", clientFiles[serverPath])
+		fmt.Println("clientFileInfo:\n", clientFileInfo)
+		fmt.Println("serverFile:\n", serverFileInfo)
+		if !exists {
+			download = append(download, serverPath)
+		} else if clientFileInfo.FileHash != serverFileInfo.FileHash {
+			// diff 处理两者修改时间，优先采取修改时间最近的
+			if serverFileInfo.ModTime.After(clientFileInfo.ModTime) {
+				upload = append(upload, serverPath) //客户端文件修改时间更新，上传客户端文件
+			} else {
+				download = append(download, serverPath)
+			}
 		}
 	}
-	for path := range clientFiles {
-		if _, exists := serverFiles[path]; !exists {
-			upload = append(upload, path)
+
+	for clientPath := range clientFiles {
+		if _, exists := serverFiles[clientPath]; !exists {
+			upload = append(upload, clientPath)
 		}
 	}
 
@@ -147,7 +165,7 @@ func (h *Hub) handleUpload(req *protocol.Message) *protocol.Message {
 			return &protocol.Message{Error: err.Error()}
 		}
 		// 广播通知其他客户端
-		fmt.Println("broadcast log:\n", req)
+		//fmt.Println("broadcast log:\n", req)
 		h.broadcast(&protocol.Message{
 			Op:   protocol.OpNotify,
 			From: req.From,
@@ -160,7 +178,15 @@ func (h *Hub) handleUpload(req *protocol.Message) *protocol.Message {
 // handleDownload 处理文件下载
 func (h *Hub) handleDownload(req *protocol.Message) *protocol.Message {
 	data, err := h.store.ReadChunk(req.Path, req.Offset, req.Size)
-	if err != nil {
+	if err == errors.New("EOF") {
+		return &protocol.Message{
+			Op:     protocol.OpDownloadAck,
+			Path:   req.Path,
+			Offset: req.Offset,
+			Size:   req.Size,
+			Data:   data,
+		}
+	} else if err != nil {
 		return &protocol.Message{Error: err.Error()}
 	}
 	return &protocol.Message{
@@ -178,8 +204,6 @@ func (h *Hub) broadcast(msg *protocol.Message) {
 	defer h.mu.RUnlock()
 	data, _ := msg.Encode()
 	for id, conn := range h.conns {
-		fmt.Println("msg:\n", msg)
-		fmt.Println("h.conns:\n", h.conns)
 		if id != msg.From {
 			conn.Write(data)
 		}
@@ -192,4 +216,5 @@ func main() {
 	hub := NewHub(repo)
 
 	log.Fatal(hub.Listen(":9527"))
+
 }

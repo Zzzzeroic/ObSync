@@ -4,16 +4,23 @@ package fsops
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Store 是文件存储抽象
 type Store struct {
 	Root string // 仓库根目录，如 /home/pi/sync/repo
 	mu   sync.Mutex
+}
+
+type FileInfo struct {
+	FileHash string
+	ModTime  time.Time
 }
 
 // NewStore 创建存储实例
@@ -71,21 +78,40 @@ func (s *Store) ReadChunk(path string, offset, size int64) ([]byte, error) {
 	defer f.Close()
 
 	buf := make([]byte, size)
+	// 文件字节长度 len(file) < size ，return {n : len(buf), err : EOF}
+	// 否则，return{n : size, err : nil}
 	n, err := f.ReadAt(buf, offset)
 	return buf[:n], err
 }
 
 // ScanAll 扫描仓库所有文件，返回 路径→哈希 映射
-func (s *Store) ScanAll() (map[string]string, error) {
-	result := make(map[string]string)
+func (s *Store) ScanAll() (map[string]FileInfo, error) {
+	result := make(map[string]FileInfo)
 	err := filepath.Walk(s.Root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
 		}
 		relPath, _ := filepath.Rel(s.Root, path)
 		hash, _ := s.HashFile(relPath)
-		result[relPath] = hash
+		fInfo := FileInfo{
+			FileHash: hash,
+			ModTime:  info.ModTime(),
+		}
+		result[relPath] = fInfo
 		return nil
 	})
 	return result, err
+}
+
+func (s *Store) ScanAllDir() ([]string, error) {
+	AllDir := make([]string, 0)
+	err := filepath.Walk(s.Root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			AllDir = append(AllDir, path)
+			fmt.Println(path, " info.IsDir:\n", info.IsDir())
+			return nil
+		}
+		return nil
+	})
+	return AllDir, err
 }
